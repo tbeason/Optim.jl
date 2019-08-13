@@ -43,12 +43,12 @@ end
 @testset "Test problems" begin
     #######################################
     # First test the subproblem.
-    srand(42)
+    Random.seed!(42)
     n = 5
     H = rand(n, n)
-    H = H' * H + 4 * eye(n)
-    H_eig = eigfact(H)
-    U = H_eig[:vectors]
+    H = H' * H + 4 * I
+    H_eig = eigen(H)
+    U = H_eig.vectors
 
     gr = zeros(n)
     gr[1] = 1.
@@ -83,38 +83,37 @@ end
     # A "hard case" where the gradient is orthogonal to the lowest eigenvector
 
     # Test the checking
-    hard_case, lambda_1_multiplicity =
+    hard_case, lambda_index =
         Optim.check_hard_case_candidate([-1., 2., 3.], [0., 1., 1.])
     @test hard_case
-    @test lambda_1_multiplicity == 1
+    @test lambda_index == 2
 
-    hard_case, lambda_1_multiplicity =
+    hard_case, lambda_index =
         Optim.check_hard_case_candidate([-1., -1., 3.], [0., 0., 1.])
     @test hard_case
-    @test lambda_1_multiplicity == 2
+    @test lambda_index == 3
 
-    hard_case, lambda_1_multiplicity =
+    hard_case, lambda_index =
         Optim.check_hard_case_candidate([-1., -1., -1.], [0., 0., 0.])
     @test hard_case
-    @test lambda_1_multiplicity == 3
+    @test lambda_index == 4
 
-    hard_case, lambda_1_multiplicity =
+    hard_case, lambda_index =
         Optim.check_hard_case_candidate([1., 2., 3.], [0., 1., 1.])
     @test !hard_case
 
-    hard_case, lambda_1_multiplicity =
+    hard_case, lambda_index =
         Optim.check_hard_case_candidate([-1., -1., -1.], [0., 0., 1.])
     @test !hard_case
 
-    hard_case, lambda_1_multiplicity =
+    hard_case, lambda_index =
         Optim.check_hard_case_candidate([-1., 2., 3.], [1., 1., 1.])
     @test !hard_case
 
-
-    # Now check an actual had case problem
+    # Now check an actual hard case problem
     L = fill(0.1, n)
     L[1] = -1.
-    H = U * diagm(L) * U'
+    H = U * Matrix(Diagonal(L)) * U'
     H = 0.5 * (H' + H)
     @test issymmetric(H)
     gr = U[:,2][:]
@@ -148,7 +147,7 @@ end
         storage[1, 1] = 12.0 * (x[1] - 5.0)^2
     end
 
-    d = TwiceDifferentiable(f, g!, h!, [0.0])
+    d = TwiceDifferentiable(f, g!, h!, [0.0,])
 
     options = Optim.Options(store_trace = false, show_trace = false,
                             extended_trace = true)
@@ -184,9 +183,10 @@ end
     @test norm(Optim.minimizer(results) - [0.0, 0.0]) < 0.01
 
     # Test Optim.newton for all twice differentiable functions in
-    # Optim.UnconstrainedProblems.examples
+    # MultivariateProblems.UnconstrainedProblems.examples
     @testset "Optim problems" begin
-        run_optim_tests(NewtonTrustRegion())
+        run_optim_tests(NewtonTrustRegion(); skip = ("Trigonometric", ),
+                        show_name = debug_printing)
     end
 end
 

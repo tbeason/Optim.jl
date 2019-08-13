@@ -1,21 +1,45 @@
-log_temperature(t::Real) = 1 / log(t)
+log_temperature(t) = 1 / log(t)
 
-constant_temperature(t::Real) = 1.0
+constant_temperature(t) = 1.0
 
-function default_neighbor!(x::Array, x_proposal::Array)
+function default_neighbor!(x::AbstractArray{T}, x_proposal::AbstractArray) where T
     @assert size(x) == size(x_proposal)
     for i in 1:length(x)
-        @inbounds x_proposal[i] = x[i] + randn()
+        @inbounds x_proposal[i] = x[i] + T(randn()) # workaround because all types might not have randn
     end
     return
 end
 
-struct SimulatedAnnealing{Tn, Ttemp} <: Optimizer
+struct SimulatedAnnealing{Tn, Ttemp} <: ZerothOrderOptimizer
     neighbor!::Tn
     temperature::Ttemp
     keep_best::Bool # not used!?
 end
 
+"""
+# SimulatedAnnealing
+## Constructor
+```julia
+SimulatedAnnealing(; neighbor = default_neighbor!,
+                     temperature = log_temperature,
+                     keep_best::Bool = true)
+```
+
+The constructor takes 3 keywords:
+* `neighbor = a!(x_proposed, x_current)`, a mutating function of the current `x`,
+and the proposed `x`
+* `T = b(iteration)`, a function of the current iteration that returns a temperature
+* `p = c(f_proposal, f_current, T)`, a function of the current temperature, current
+function value and proposed function value that returns an acceptance probability
+
+## Description
+Simulated Annealing is a derivative free method for optimization. It is based on the
+Metropolis-Hastings algorithm that was originally used to generate samples from a
+thermodynamics system, and is often used to generate draws from a posterior when doing
+Bayesian inference. As such, it is a probabilistic method for finding the minimum of a
+function, often over a quite large domains. For the historical reasons given above, the
+algorithm uses terms such as cooling, temperature, and acceptance probabilities.
+"""
 SimulatedAnnealing(;neighbor = default_neighbor!,
                     temperature = log_temperature,
                     keep_best::Bool = true) =
@@ -23,11 +47,11 @@ SimulatedAnnealing(;neighbor = default_neighbor!,
 
 Base.summary(::SimulatedAnnealing) = "Simulated Annealing"
 
-mutable struct SimulatedAnnealingState{T, N}
-    x::Array{T,N}
+mutable struct SimulatedAnnealingState{Tx,T} <: ZerothOrderState
+    x::Tx
     iteration::Int
-    x_current::Array{T, N}
-    x_proposal::Array{T, N}
+    x_current::Tx
+    x_proposal::Tx
     f_x_current::T
     f_proposal::T
 end
@@ -35,17 +59,16 @@ end
 pick_best_x(f_increased, state::SimulatedAnnealingState) = state.x
 pick_best_f(f_increased, state::SimulatedAnnealingState, d) = value(d)
 
-function initial_state(method::SimulatedAnnealing, options, f, initial_x::Array{T}) where T
-    # Count number of parameters
-    n = length(initial_x)
-    value!(f, initial_x)
+function initial_state(method::SimulatedAnnealing, options, d, initial_x::AbstractArray{T}) where T
+
+    value!!(d, initial_x)
 
     # Store the best state ever visited
     best_x = copy(initial_x)
-    SimulatedAnnealingState(copy(best_x), 1, best_x, similar(initial_x), f.f_x, f.f_x)
+    SimulatedAnnealingState(copy(best_x), 1, best_x, copy(initial_x), value(d), value(d))
 end
 
-function update_state!(nd, state::SimulatedAnnealingState{T}, method::SimulatedAnnealing) where T
+function update_state!(nd, state::SimulatedAnnealingState{Tx, T}, method::SimulatedAnnealing) where {Tx, T}
 
     # Determine the temperature for current iteration
     t = method.temperature(state.iteration)
@@ -58,45 +81,23 @@ function update_state!(nd, state::SimulatedAnnealingState{T}, method::SimulatedA
 
     if state.f_proposal <= state.f_x_current
         # If proposal is superior, we always move to it
-        copy!(state.x_current, state.x_proposal)
+        copyto!(state.x_current, state.x_proposal)
         state.f_x_current = state.f_proposal
 
         # If the new state is the best state yet, keep a record of it
-        if state.f_proposal < nd.f_x
-            nd.f_x = state.f_proposal
-            copy!(state.x, state.x_proposal)
+        if state.f_proposal < value(nd)
+            nd.F = state.f_proposal
+            copyto!(state.x, state.x_proposal)
         end
     else
         # If proposal is inferior, we move to it with probability p
         p = exp(-(state.f_proposal - state.f_x_current) / t)
         if rand() <= p
-            copy!(state.x_current, state.x_proposal)
+            copyto!(state.x_current, state.x_proposal)
             state.f_x_current = state.f_proposal
         end
     end
 
     state.iteration += 1
     false
-end
-
-function assess_convergence(state::SimulatedAnnealingState, d, options)
-    false, false, false, false, false
-end
-f_residual(d::AbstractObjective, state::SimulatedAnnealingState, options::Options) = convert(typeof(value(d)), NaN)
-x_residual(state::SimulatedAnnealingState) = convert(eltype(state.x), NaN)
-
-function trace!(tr, d, state, iteration, method::SimulatedAnnealing, options)
-    dt = Dict()
-    if options.extended_trace
-        dt["x"] = copy(state.x)
-    end
-    update!(tr,
-            state.iteration,
-            d.f_x,
-            NaN,
-            dt,
-            options.store_trace,
-            options.show_trace,
-            options.show_every,
-            options.callback)
 end

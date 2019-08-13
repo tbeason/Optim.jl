@@ -1,4 +1,4 @@
-mutable struct UnivariateOptimizationResults{Tb,Tt,Tf, Tx,M,O<:Optimizer} <: OptimizationResults
+mutable struct UnivariateOptimizationResults{Tb,Tt,Tf, Tx,M,O<:UnivariateOptimizer} <: OptimizationResults
     method::O
     initial_lower::Tb
     initial_upper::Tb
@@ -12,4 +12,3 @@ mutable struct UnivariateOptimizationResults{Tb,Tt,Tf, Tx,M,O<:Optimizer} <: Opt
     trace::OptimizationTrace{M}
     f_calls::Int
 end
-iscomplex(r::UnivariateOptimizationResults) = false

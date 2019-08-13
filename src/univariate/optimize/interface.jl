@@ -1,4 +1,3 @@
-
 # Univariate Options
 function optimize(f::F,
      lower::T,
@@ -31,23 +30,27 @@ function optimize(f::F,
 end
 
 function optimize(f::F,
-     lower::Real,
-     upper::Real;
-     kwargs...) where F<:Function
+    lower::Union{Integer, Real},
+    upper::Union{Integer, Real};
+    kwargs...) where F<:Function
+     
+    T = promote_type(typeof(lower/1), typeof(upper/1))
     optimize(f,
-             Float64(lower),
-             Float64(upper);
+             T(lower),
+             T(upper);
              kwargs...)
 end
 
 function optimize(f::F,
-     lower::Real,
-     upper::Real,
-     mo::Union{Brent, GoldenSection};
-     kwargs...) where F<:Function
+    lower::Union{Integer, Real},
+    upper::Union{Integer, Real},
+    method::Union{Brent, GoldenSection};
+    kwargs...) where F<:Function
+     
+    T = promote_type(typeof(lower/1), typeof(upper/1))
     optimize(f,
-             Float64(lower),
-             Float64(upper),
-             mo;
+             T(lower),
+             T(upper),
+             method;
              kwargs...)
 end

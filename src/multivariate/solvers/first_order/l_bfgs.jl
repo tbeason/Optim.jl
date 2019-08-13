@@ -5,19 +5,17 @@
 # Here alpha is a cache that parallels betas
 # It is not the step-size
 # q is also a cache
-function twoloop!(s::Vector,
-                  gr::Vector,
-                  rho::Vector,
-                  dx_history::Matrix,
-                  dg_history::Matrix,
+function twoloop!(s,
+                  gr,
+                  rho,
+                  dx_history,
+                  dg_history,
                   m::Integer,
                   pseudo_iteration::Integer,
-                  alpha::Vector,
-                  q::Vector,
+                  alpha,
+                  q,
                   scaleinvH0::Bool,
-                  precon,
-                  devec_fun #all data is passed to this function is flat vectors, but precon might expect something different. this function undoes the flattening
-                  )
+                  precon)
     # Count number of parameters
     n = length(s)
 
@@ -26,7 +24,7 @@ function twoloop!(s::Vector,
     upper = pseudo_iteration - 1
 
     # Copy gr into q for backward pass
-    copy!(q, gr)
+    copyto!(q, gr)
 
     # Backward pass
     for index in upper:-1:lower
@@ -34,9 +32,9 @@ function twoloop!(s::Vector,
             continue
         end
         i   = mod1(index, m)
-        dgi = view(dg_history, :, i)
-        dxi = view(dx_history, :, i)
-        @inbounds alpha[i] = rho[i] * vecdot(dxi, q)
+        dgi = dg_history[i]
+        dxi = dx_history[i]
+        @inbounds alpha[i] = rho[i] * real(dot(dxi, q))
         @inbounds q .-= alpha[i] .* dgi
     end
 
@@ -44,8 +42,8 @@ function twoloop!(s::Vector,
     # apply preconditioner if precon != nothing
     # (Note: preconditioner update was done outside of this function)
     if scaleinvH0 == true && pseudo_iteration > 1
-        # Use the initial scaling guess if no preconditioner is used
-        # See Nocedal & Wright (2nd ed), Equation (7.20)
+        # Use the initial scaling guess from
+        # Nocedal & Wright (2nd ed), Equation (7.20)
 
         #=
         pseudo_iteration > 1 prevents this scaling from happening
@@ -54,12 +52,12 @@ function twoloop!(s::Vector,
         TODO: Maybe we can still use the scaling as long as iteration > 1?
         =#
         i = mod1(upper, m)
-        dxi = view(dx_history, :, i)
-        dgi = view(dg_history, :, i)
-        scaling = dot(dxi, dgi) / sum(abs2, dgi)
+        dxi = dx_history[i]
+        dgi = dg_history[i]
+        scaling = real(dot(dxi, dgi)) / sum(abs2, dgi)
         @. s = scaling*q
     else
-        A_ldiv_B!(devec_fun(s), precon, devec_fun(q))
+        ldiv!(s, precon, q)
     end
     # Forward pass
     for index in lower:1:upper
@@ -67,19 +65,19 @@ function twoloop!(s::Vector,
             continue
         end
         i = mod1(index, m)
-        dgi = view(dg_history, :, i)
-        dxi = view(dx_history, :, i)
-        @inbounds beta = rho[i] * vecdot(dgi, s)
+        dgi = dg_history[i]
+        dxi = dx_history[i]
+        @inbounds beta = rho[i] * real(dot(dgi, s))
         @inbounds s .+= dxi .* (alpha[i] - beta)
     end
 
     # Negate search direction
-    scale!(s, -1)
+    rmul!(s, eltype(s)(-1))
 
     return
 end
 
-struct LBFGS{T, IL, L, Tprep<:Union{Function, Void}} <: Optimizer
+struct LBFGS{T, IL, L, Tprep<:Union{Function, Nothing}} <: FirstOrderOptimizer
     m::Int
     alphaguess!::IL
     linesearch!::L
@@ -98,7 +96,7 @@ linesearch = LineSearches.HagerZhang(),
 P=nothing,
 precondprep = (P, x) -> nothing,
 manifold = Flat(),
-scaleinvH0::Bool = true && (typeof(P) <: Void))
+scaleinvH0::Bool = true && (typeof(P) <: Nothing))
 ```
 `LBFGS` has two special keywords; the memory length `m`,
 and the `scaleinvH0` flag.
@@ -127,72 +125,74 @@ function LBFGS(; m::Integer = 10,
                  P=nothing,
                  precondprep = (P, x) -> nothing,
                  manifold::Manifold=Flat(),
-                 scaleinvH0::Bool = true && (typeof(P) <: Void) )
+                 scaleinvH0::Bool = true && (typeof(P) <: Nothing) )
     LBFGS(Int(m), alphaguess, linesearch, P, precondprep, manifold, scaleinvH0)
 end
 
 Base.summary(::LBFGS) = "L-BFGS"
 
-mutable struct LBFGSState{T,N,M,G}
-    x::Array{T,N}
-    x_previous::Array{T,N}
+mutable struct LBFGSState{Tx, Tdx, Tdg, T, G} <: AbstractOptimizerState
+    x::Tx
+    x_previous::Tx
     g_previous::G
     rho::Vector{T}
-    dx_history::Array{T,M}
-    dg_history::Array{T,M}
-    dx::Array{T,N}
-    dg::Array{T,N}
-    u::Array{T,N}
+    dx_history::Tdx
+    dg_history::Tdg
+    dx::Tx
+    dg::Tx
+    u::Tx
     f_x_previous::T
     twoloop_q
     twoloop_alpha
     pseudo_iteration::Int
-    s::Array{T,N}
+    s::Tx
     @add_linesearch_fields()
 end
 
-function initial_state(method::LBFGS, options, d, initial_x::Array{T}) where T
+function initial_state(method::LBFGS, options, d, initial_x)
+    T = real(eltype(initial_x))
     n = length(initial_x)
     initial_x = copy(initial_x)
-    retract!(method.manifold, real_to_complex(d,initial_x))
-    value_gradient!(d, initial_x)
-    project_tangent!(method.manifold, real_to_complex(d,gradient(d)), real_to_complex(d,initial_x))
+    retract!(method.manifold, initial_x)
+
+    value_gradient!!(d, initial_x)
+
+    project_tangent!(method.manifold, gradient(d), initial_x)
     LBFGSState(initial_x, # Maintain current state in state.x
-              similar(initial_x), # Maintain previous state in state.x_previous
+              copy(initial_x), # Maintain previous state in state.x_previous
               similar(gradient(d)), # Store previous gradient in state.g_previous
-              Vector{T}(method.m), # state.rho
-              Matrix{T}(n, method.m), # Store changes in position in state.dx_history
-              Matrix{T}(n, method.m), # Store changes in gradient in state.dg_history
+              Vector{T}(undef, method.m), # state.rho
+              [similar(initial_x) for i = 1:method.m], # Store changes in position in state.dx_history
+              [similar(gradient(d)) for i = 1:method.m], # Store changes in position in state.dg_history
               similar(initial_x), # Buffer for new entry in state.dx_history
               similar(initial_x), # Buffer for new entry in state.dg_history
               similar(initial_x), # Buffer stored in state.u
-              T(NaN), # Store previous f in state.f_x_previous
+              real(T)(NaN), # Store previous f in state.f_x_previous
               similar(initial_x), #Buffer for use by twoloop
-              Vector{T}(method.m), #Buffer for use by twoloop
+              Vector{T}(undef, method.m), #Buffer for use by twoloop
               0,
               similar(initial_x), # Store current search direction in state.s
-              @initial_linesearch()...) # Maintain a cache for line search results in state.lsr
+              @initial_linesearch()...)
 end
 
-function update_state!(d, state::LBFGSState{T}, method::LBFGS) where T
+function update_state!(d, state::LBFGSState, method::LBFGS)
     n = length(state.x)
     # Increment the number of steps we've had to perform
     state.pseudo_iteration += 1
 
-    project_tangent!(method.manifold, real_to_complex(d,gradient(d)), real_to_complex(d,state.x))
+    project_tangent!(method.manifold, gradient(d), state.x)
 
     # update the preconditioner
-    method.precondprep!(method.P, real_to_complex(d,state.x))
+    method.precondprep!(method.P, state.x)
 
     # Determine the L-BFGS search direction # FIXME just pass state and method?
-    devec_fun(x) = real_to_complex(d,reshape(x, size(state.s)))
-    twoloop!(vec(state.s), vec(gradient(d)), vec(state.rho), state.dx_history, state.dg_history,
+    twoloop!(state.s, gradient(d), state.rho, state.dx_history, state.dg_history,
              method.m, state.pseudo_iteration,
-             state.twoloop_alpha, vec(state.twoloop_q), method.scaleinvH0, method.P, devec_fun)
-    project_tangent!(method.manifold, real_to_complex(d,state.s), real_to_complex(d,state.x))
+             state.twoloop_alpha, state.twoloop_q, method.scaleinvH0, method.P)
+    project_tangent!(method.manifold, state.s, state.x)
 
     # Save g value to prepare for update_g! call
-    copy!(state.g_previous, gradient(d))
+    copyto!(state.g_previous, gradient(d))
 
     # Determine the distance of movement along the search line
     lssuccess = perform_linesearch!(state, method, ManifoldObjective(method.manifold, d))
@@ -200,7 +200,7 @@ function update_state!(d, state::LBFGSState{T}, method::LBFGS) where T
     # Update current position
     state.dx .= state.alpha .* state.s
     state.x .= state.x .+ state.dx
-    retract!(method.manifold, real_to_complex(d,state.x))
+    retract!(method.manifold, state.x)
 
     lssuccess == false # break on linesearch error
 end
@@ -212,22 +212,17 @@ function update_h!(d, state, method::LBFGS)
     state.dg .= gradient(d) .- state.g_previous
 
     # Update the L-BFGS history of positions and gradients
-    rho_iteration = one(eltype(state.dx)) / vecdot(state.dx, state.dg)
+    rho_iteration = one(eltype(state.dx)) / real(dot(state.dx, state.dg))
     if isinf(rho_iteration)
         # TODO: Introduce a formal error? There was a warning here previously
         return true
     end
     idx = mod1(state.pseudo_iteration, method.m)
-    @inbounds state.dx_history[:, idx] .= vec(state.dx)
-    @inbounds state.dg_history[:, idx] .= vec(state.dg)
+    @inbounds state.dx_history[idx] .= state.dx
+    @inbounds state.dg_history[idx] .= state.dg
     @inbounds state.rho[idx] = rho_iteration
 end
 
-function assess_convergence(state::LBFGSState, d, options)
-  default_convergence_assessment(state, d, options)
-end
-
-
-function trace!(tr, d, state, iteration, method::LBFGS, options)
-  common_trace!(tr, d, state, iteration, method, options)
+function trace!(tr, d, state, iteration, method::LBFGS, options, curr_time=time())
+  common_trace!(tr, d, state, iteration, method, options, curr_time)
 end

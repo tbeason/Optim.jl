@@ -36,7 +36,7 @@ is the Golden Ratio.
 ## References
 https://en.wikipedia.org/wiki/Golden-section_search
 """
-struct GoldenSection <: Optimizer end
+struct GoldenSection <: UnivariateOptimizer end
 
 Base.summary(::GoldenSection) = "Golden Section Search"
 
@@ -70,7 +70,7 @@ function optimize(f::F, x_lower::T, x_upper::T,
     converged = false
 
     # Trace the history of states visited
-    tr = OptimizationTrace{typeof(mo)}()
+    tr = OptimizationTrace{T, typeof(mo)}()
     tracing = store_trace || show_trace || extended_trace || callback != nothing
     @goldensectiontrace
 

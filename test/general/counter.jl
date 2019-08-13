@@ -1,5 +1,5 @@
 @testset "function counter" begin
-    prob = Optim.UnconstrainedProblems.examples["Rosenbrock"]
+    prob = MultivariateProblems.UnconstrainedProblems.examples["Rosenbrock"]
 
     let
         global fcount = 0
@@ -36,23 +36,24 @@
 
     f(x) = begin
         fcounter()
-        prob.f(x)
+        MVP.objective(prob)(x)
     end
     g!(out, x) = begin
         gcounter()
-        prob.g!(out, x)
+        MVP.gradient(prob)(out, x)
     end
     h!(out, x) = begin
         hcounter()
-        prob.h!(out, x)
+        MVP.hessian(prob)(out, x)
     end
 
     ls = LineSearches.Static()
 
     for solver in (AcceleratedGradientDescent, BFGS, ConjugateGradient,
-                   GradientDescent, LBFGS, MomentumGradientDescent)
+                   GradientDescent, LBFGS, MomentumGradientDescent,
+                   NGMRES, OACCEL)
         fcounter(true); gcounter(true)
-        res = Optim.optimize(f,g!, prob.initial_x,
+        res = Optim.optimize(f, g!, prob.initial_x,
                              solver(linesearch = ls))
         @test fcount == Optim.f_calls(res)
         @test gcount == Optim.g_calls(res)
@@ -74,14 +75,14 @@
     end
     hv!(out, x, v) = begin
         n = length(x)
-        H = Matrix{Float64}(n, n)
+        H = Matrix{Float64}(undef, n, n)
         h!(H, x)
         out .= H * v
     end
     begin
         solver = Optim.KrylovTrustRegion()
         fcounter(true); gcounter(true); hcounter(true)
-        df = Optim.TwiceDifferentiableHV(f,fg!,hv!)
+        df = Optim.TwiceDifferentiableHV(f, fg!, hv!, prob.initial_x)
         res = Optim.optimize(df, prob.initial_x, solver)
         @test fcount == Optim.f_calls(res)
         @test gcount == Optim.g_calls(res)

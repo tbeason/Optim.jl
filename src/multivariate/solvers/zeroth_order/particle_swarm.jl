@@ -1,18 +1,44 @@
-struct ParticleSwarm{T} <: Optimizer
+struct ParticleSwarm{T} <: ZerothOrderOptimizer
     lower::Vector{T}
     upper::Vector{T}
     n_particles::Int
 end
 
+"""
+# Particle Swarm
+## Constructor
+```julia
+ParticleSwarm(; lower = [],
+                upper = [],
+                n_particles = 0)
+```
+
+The constructor takes 3 keywords:
+* `lower = []`, a vector of lower bounds, unbounded below if empty or `Inf`'s
+* `upper = []`, a vector of upper bounds, unbounded above if empty or `Inf`'s
+* `n_particles = 0`, the number of particles in the swarm, defaults to least three
+
+## Description
+The Particle Swarm implementation in Optim.jl is the so-called Adaptive Particle
+Swarm algorithm in [1]. It attempts to improve global coverage and convergence by
+switching between four evolutionary states: exploration, exploitation, convergence,
+and jumping out. In the jumping out state it intentially tries to take the best
+particle and move it away from its (potentially and probably) local optimum, to
+improve the ability to find a global optimum. Of course, this comes a the cost
+of slower convergence, but hopefully converges to the global optimum as a result.
+
+## References
+- [1] Zhan, Zhang, and Chung. Adaptive particle swarm optimization, IEEE Transactions on Systems, Man, and Cybernetics, Part B: CyberneticsVolume 39, Issue 6 (2009): 1362-1381
+"""
 ParticleSwarm(; lower = [], upper = [], n_particles = 0) = ParticleSwarm(lower, upper, n_particles)
 
 Base.summary(::ParticleSwarm) = "Particle Swarm"
 
-mutable struct ParticleSwarmState{T,N}
-    x::Array{T,N}
+mutable struct ParticleSwarmState{Tx,T} <: ZerothOrderState
+    x::Tx
     iteration::Int
-    lower::Array{T,N}
-    upper::Array{T,N}
+    lower::Tx
+    upper::Tx
     c1::T # Weight variable; currently not exposed to users
     c2::T # Weight variable; currently not exposed to users
     w::T  # Weight variable; currently not exposed to users
@@ -28,8 +54,7 @@ mutable struct ParticleSwarmState{T,N}
     iterations::Int
 end
 
-function initial_state(method::ParticleSwarm, options, f, initial_x::Array{T}) where T
-
+function initial_state(method::ParticleSwarm, options, d, initial_x::AbstractArray{T}) where T
     #=
     Variable X represents the whole swarm of solutions with
     the columns being the individual particles (= solutions to
@@ -50,20 +75,20 @@ function initial_state(method::ParticleSwarm, options, f, initial_x::Array{T}) w
     # do some checks on input parameters
     @assert length(method.lower) == length(method.upper) "lower and upper must be of same length."
     if length(method.lower) > 0
-        lower = copy!(similar(initial_x), copy(method.lower))
-        upper = copy!(similar(initial_x), copy(method.upper))
+        lower = copyto!(similar(initial_x), copy(method.lower))
+        upper = copyto!(similar(initial_x), copy(method.upper))
         limit_search_space = true
         @assert length(lower) == length(initial_x) "limits must be of same length as x_initial."
         @assert all(upper .> lower) "upper must be greater than lower"
     else
-        lower = similar(initial_x)
-        upper = similar(initial_x)
+        lower = copy(initial_x)
+        upper = copy(initial_x)
         limit_search_space = false
     end
 
     if method.n_particles > 0
         if method.n_particles < 3
-          warn("Number of particles is set to 3 (minimum required)")
+          @warn("Number of particles is set to 3 (minimum required)")
           n_particles = 3
         else
           n_particles = method.n_particles
@@ -72,21 +97,22 @@ function initial_state(method::ParticleSwarm, options, f, initial_x::Array{T}) w
       # user did not define number of particles
        n_particles = maximum([3, length(initial_x)])
     end
-    c1 = 2.0
-    c2 = 2.0
-    w = 1.0
+    c1 = T(2)
+    c2 = T(2)
+    w = T(1)
 
-    X = Array{T}(n, n_particles)
-    V = Array{T}(n, n_particles)
-    X_best = Array{T}(n, n_particles)
+    X = Array{T,2}(undef, n, n_particles)
+    V = Array{T,2}(undef, n, n_particles)
+    X_best = Array{T,2}(undef, n, n_particles)
     dx = zeros(T, n)
     score = zeros(T, n_particles)
-    x = similar(initial_x)
+    x = copy(initial_x)
     best_score = zeros(T, n_particles)
-    x_learn = similar(initial_x)
+    x_learn = copy(initial_x)
 
     current_state = 0
-    value!(f, initial_x)
+
+    value!!(d, initial_x)
 
     # if search space is limited, spread the initial population
     # uniformly over the whole search space
@@ -94,24 +120,24 @@ function initial_state(method::ParticleSwarm, options, f, initial_x::Array{T}) w
         for i in 1:n_particles
             for j in 1:n
                 ww = upper[j] - lower[j]
-                X[j, i] = lower[j] + ww * rand()
+                X[j, i] = lower[j] + ww * rand(T)
                 X_best[j, i] = X[j, i]
-                V[j, i] = ww * (rand() * 2.0 - 1.0) / 10.0
+                V[j, i] = ww * (rand(T) * T(2) - T(1)) / 10
             end
         end
     else
         for i in 1:n_particles
             for j in 1:n
                 if i == 1
-                    if abs(initial_x[i]) > 0.0
+                    if abs(initial_x[i]) > T(0)
                         dx[j] = abs(initial_x[i])
                     else
-                        dx[j] = 1.0
+                        dx[j] = T(1)
                     end
                 end
-                X[j, i] = initial_x[j] + dx[j] * rand()
+                X[j, i] = initial_x[j] + dx[j] * rand(T)
                 X_best[j, i] = X[j, i]
-                V[j, i] = abs(X[j, i]) * (rand() * 2.0 - 1.0)
+                V[j, i] = abs(X[j, i]) * (rand(T) * T(2) - T(1))
             end
         end
     end
@@ -148,10 +174,10 @@ function update_state!(f, state::ParticleSwarmState{T}, method::ParticleSwarm) w
     compute_cost!(f, state.n_particles, state.X, state.score)
 
     if state.iteration == 0
-        copy!(state.best_score, state.score)
-        f.f_x = Base.minimum(state.score)
+        copyto!(state.best_score, state.score)
+        f.F = Base.minimum(state.score)
     end
-    f.f_x = housekeeping!(state.score,
+    f.F = housekeeping!(state.score,
                               state.best_score,
                               state.X,
                               state.X_best,
@@ -190,8 +216,8 @@ function update_state!(f, state::ParticleSwarmState{T}, method::ParticleSwarm) w
     end
 
     score_learn = value(f, state.x_learn)
-    if score_learn < f.f_x
-        f.f_x = score_learn * 1.0
+    if score_learn < f.F
+        f.F = score_learn * 1.0
         for j in 1:n
             state.X_best[j, i_worst] = state.x_learn[j]
             state.X[j, i_worst] = state.x_learn[j]
@@ -210,13 +236,13 @@ function update_state!(f, state::ParticleSwarmState{T}, method::ParticleSwarm) w
 end
 
 
-function update_swarm!(X, X_best, best_point, n, n_particles, V,
-                       w, c1, c2)
+function update_swarm!(X::AbstractArray{Tx}, X_best, best_point, n, n_particles, V,
+                       w, c1, c2) where Tx
   # compute new positions for the swarm particles
   for i in 1:n_particles
       for j in 1:n
-          r1 = rand()
-          r2 = rand()
+          r1 = rand(Tx)
+          r2 = rand(Tx)
           vx = X_best[j, i] - X[j, i]
           vg = best_point[j] - X[j, i]
           V[j, i] = V[j, i]*w + c1*r1*vx + c2*r2*vg
@@ -225,64 +251,64 @@ function update_swarm!(X, X_best, best_point, n, n_particles, V,
     end
 end
 
-function get_mu_1(f)
-    if 0 <= f <= 0.4
-        return 0.0
-    elseif 0.4 < f <= 0.6
-        return 5. * f - 2.0
-    elseif 0.6 < f <= 0.7
-        return 1.0
-    elseif 0.7 < f <= 0.8
-        return -10. * f + 8.0
+function get_mu_1(f::Tx) where Tx
+    if Tx(0) <= f <= Tx(4)/10
+        return Tx(0)
+    elseif Tx(4)/10 < f <= Tx(6)/10
+        return Tx(5) * f - Tx(2)
+    elseif Tx(6)/10 < f <= Tx(7)/10
+        return Tx(1)
+    elseif Tx(7)/10 < f <= Tx(8)/10
+        return -Tx(10) * f + Tx(8)
     else
-        return 0.0
+        return Tx(0)
     end
 end
 
-function get_mu_2(f)
-    if 0 <= f <= 0.2
-        return 0.0
-    elseif 0.2 < f <= 0.3
-        return 10. * f - 2.0
-    elseif 0.3 < f <= 0.4
-        return 1.0
-    elseif 0.4 < f <= 0.6
-        return -5. * f + 3.0
+function get_mu_2(f::Tx) where Tx
+    if Tx(0) <= f <= Tx(2)/10
+        return Tx(0)
+    elseif Tx(2)/10 < f <= Tx(3)/10
+        return Tx(10) * f - Tx(2)
+    elseif Tx(3)/10 < f <= Tx(4)/10
+        return Tx(1)
+    elseif Tx(4)/10 < f <= Tx(6)/10
+        return -Tx(5) * f + Tx(3)
     else
-        return 0.0
+        return Tx(0)
     end
 end
 
-function get_mu_3(f)
-    if 0 <= f <= 0.1
-        return 1.0
-    elseif 0.1 < f <= 0.3
-        return -5. * f + 1.5
+function get_mu_3(f::Tx) where Tx
+    if Tx(0) <= f <= Tx(1)/10
+        return Tx(1)
+    elseif Tx(1)/10 < f <= Tx(3)/10
+        return -Tx(5) * f + Tx(3)/2
     else
-        return 0.0
+        return Tx(0)
     end
 end
 
-function get_mu_4(f)
-    if 0 <= f <= 0.7
-        return 0.0
-    elseif 0.7 < f <= 0.9
-        return 5. * f - 3.5
+function get_mu_4(f::Tx) where Tx
+    if Tx(0) <= f <= Tx(7)/10
+        return Tx(0)
+    elseif Tx(7)/10 < f <= Tx(9)/10
+        return Tx(5) * f - Tx(7)/2
     else
-        return 1.0
+        return Tx(1)
     end
 end
 
-function get_swarm_state(X, score, best_point, previous_state)
+function get_swarm_state(X::AbstractArray{Tx}, score, best_point, previous_state) where Tx
     # swarm can be in 4 different states, depending on which
     # the weighing factors c1 and c2 are adapted.
     # New state is not only depending on the current swarm state,
     # but also from the previous state.
     n, n_particles = size(X)
     f_best, i_best = findmin(score)
-    d = zeros(Float64, n_particles)
+    d = zeros(Tx, n_particles)
     for i in 1:n_particles
-        dd = 0.0
+        dd = Tx(0.0)
         for k in 1:n_particles
             for dim in 1:n
                 @inbounds ddd = (X[dim, i] - X[dim, k])
@@ -295,8 +321,9 @@ function get_swarm_state(X, score, best_point, previous_state)
     dmin = Base.minimum(d)
     dmax = Base.maximum(d)
 
-    f = (dg - dmin) / (dmax - dmin)
-    mu = zeros(Float64, 4)
+    f = (dg - dmin) / max(dmax - dmin, sqrt(eps(Tx)))
+
+    mu = zeros(Tx, 4)
     mu[1] = get_mu_1(f)
     mu[2] = get_mu_2(f)
     mu[3] = get_mu_3(f)
@@ -358,49 +385,49 @@ function get_swarm_state(X, score, best_point, previous_state)
     return current_state, f
 end
 
-function update_swarm_params!(c1, c2, w, current_state, f)
+function update_swarm_params!(c1, c2, w, current_state, f::T) where T
 
-    delta_c1 = 0.05 + rand() / 20.
-    delta_c2 = 0.05 + rand() / 20.
+    delta_c1 = T(5)/100 + rand(T) / T(20)
+    delta_c2 = T(5)/100 + rand(T) / T(20)
 
     if current_state == 1
         c1 += delta_c1
         c2 -= delta_c2
     elseif current_state == 2
-        c1 += delta_c1 / 2.
-        c2 -= delta_c2 / 2.
+        c1 += delta_c1 / 2
+        c2 -= delta_c2 / 2
     elseif current_state == 3
-        c1 += delta_c1 / 2.
-        c2 += delta_c2 / 2.
+        c1 += delta_c1 / 2
+        c2 += delta_c2 / 2
     elseif current_state == 4
         c1 -= delta_c1
         c2 -= delta_c2
     end
 
-    if c1 < 1.5
-        c1 = 1.5
-    elseif c1 > 2.5
-        c1 = 2.5
+    if c1 < T(3)/2
+        c1 = T(3)/2
+    elseif c1 > T(5)/2
+        c1 = T(5)/2
     end
 
-    if c2 < 1.5
-        c2 = 2.5
-    elseif c2 > 2.5
-        c2 = 2.5
+    if c2 < T(3)/2
+        c2 = T(5)/2
+    elseif c2 > T(5)/2
+        c2 = T(5)/2
     end
 
-    if c1 + c2 > 4.0
+    if c1 + c2 > T(4)
         c_total = c1 + c2
         c1 = c1 / c_total * 4
         c2 = c2 / c_total * 4
     end
 
-    w = 1 / (1 + 1.5 * exp(-2.6 * f))
+    w = 1 / (1 + T(3)/2 * exp(-T(26)/10 * f))
     return w, c1, c2
 end
 
 function housekeeping!(score, best_score, X, X_best, best_point,
-                       f_x, n_particles)
+                       F, n_particles)
     n = size(X, 1)
     for i in 1:n_particles
         if score[i] <= best_score[i]
@@ -408,15 +435,15 @@ function housekeeping!(score, best_score, X, X_best, best_point,
             for k in 1:n
                 X_best[k, i] = X[k, i]
             end
-            if score[i] <= f_x
+            if score[i] <= F
                 for k in 1:n
                   	best_point[k] = X[k, i]
                 end
-              	f_x = score[i]
+              	F = score[i]
             end
         end
     end
-    return f_x
+    return F
 end
 
 function limit_X!(X, lower, upper, n_particles, n)
@@ -442,26 +469,4 @@ function compute_cost!(f,
         score[i] = value(f, X[:, i])
     end
     nothing
-end
-
-function assess_convergence(state::ParticleSwarmState, d, options)
-  false, false, false, false, false
-end
-f_residual(d::AbstractObjective, state::ParticleSwarmState, options::Options) = convert(typeof(value(d)), NaN)
-x_residual(state::ParticleSwarmState) = convert(eltype(state.x), NaN)
-
-function trace!(tr, d, state, iteration, method::ParticleSwarm, options)
-    dt = Dict()
-    if options.extended_trace
-        dt["x"] = copy(state.x)
-    end
-    update!(tr,
-            state.iteration,
-            d.f_x,
-            NaN,
-            dt,
-            options.store_trace,
-            options.show_trace,
-            options.show_every,
-            options.callback)
 end

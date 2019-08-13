@@ -1,4 +1,4 @@
-struct Newton{IL, L} <: Optimizer
+struct Newton{IL, L} <: SecondOrderOptimizer
     alphaguess!::IL
     linesearch!::L
 end
@@ -27,45 +27,54 @@ end
 
 Base.summary(::Newton) = "Newton's Method"
 
-mutable struct NewtonState{T, N, F<:Base.LinAlg.Cholesky}
-    x::Array{T,N}
-    x_previous::Array{T, N}
+mutable struct NewtonState{Tx, T, F<:Cholesky} <: AbstractOptimizerState
+    x::Tx
+    x_previous::Tx
     f_x_previous::T
     F::F
-    s::Array{T, N}
+    s::Tx
     @add_linesearch_fields()
 end
 
-function initial_state(method::Newton, options, d, initial_x::Array{T}) where T
+function initial_state(method::Newton, options, d, initial_x)
+    T = eltype(initial_x)
     n = length(initial_x)
     # Maintain current gradient in gr
     s = similar(initial_x)
-    value_gradient!(d, initial_x)
-    hessian!(d, initial_x)
+
+    value_gradient!!(d, initial_x)
+    hessian!!(d, initial_x)
+
     NewtonState(copy(initial_x), # Maintain current state in state.x
-                similar(initial_x), # Maintain previous state in state.x_previous
+                copy(initial_x), # Maintain previous state in state.x_previous
                 T(NaN), # Store previous f in state.f_x_previous
-                @static(VERSION >= v"0.7.0-DEV.393" ?
-                        Base.LinAlg.Cholesky(similar(d.H, T, 0, 0), :U, BLAS.BlasInt(0)) :
-                        Base.LinAlg.Cholesky(similar(d.H, T, 0, 0), :U)),
+                Cholesky(similar(d.H, T, 0, 0), :U, BLAS.BlasInt(0)),
                 similar(initial_x), # Maintain current search direction in state.s
-                @initial_linesearch()...) # Maintain a cache for line search results in state.lsr
+                @initial_linesearch()...)
 end
 
-function update_state!(d, state::NewtonState{T}, method::Newton) where T
+function update_state!(d, state::NewtonState, method::Newton)
     # Search direction is always the negative gradient divided by
     # a matrix encoding the absolute values of the curvatures
     # represented by H. It deviates from the usual "add a scaled
     # identity matrix" version of the modified Newton method. More
     # information can be found in the discussion at issue #153.
+    T = eltype(state.x)
 
     if typeof(NLSolversBase.hessian(d)) <: AbstractSparseMatrix
-        state.s .= -NLSolversBase.hessian(d)\gradient(d)
+        state.s .= -NLSolversBase.hessian(d)\convert(Vector{T}, gradient(d))
     else
-        state.F = cholfact!(Positive, NLSolversBase.hessian(d))
-        state.s .= -(state.F\gradient(d))
+        state.F = cholesky!(Positive, NLSolversBase.hessian(d))
+        if typeof(gradient(d)) <: Array
+            # is this actually StridedArray?
+            ldiv!(state.s, state.F, -gradient(d))
+        else
+            # not Array, we can't do inplace ldiv
+            gv = Vector{T}(undef, length(gradient(d)))
+            copyto!(gv, -gradient(d))
+            copyto!(state.s, state.F\gv)
+        end
     end
-
     # Determine the distance of movement along the search line
     lssuccess = perform_linesearch!(state, method, d)
 
@@ -74,19 +83,16 @@ function update_state!(d, state::NewtonState{T}, method::Newton) where T
     lssuccess == false # break on linesearch error
 end
 
-function assess_convergence(state::NewtonState, d, options)
-  default_convergence_assessment(state, d, options)
-end
-
-function trace!(tr, d, state, iteration, method::Newton, options)
+function trace!(tr, d, state, iteration, method::Newton, options, curr_time=time())
     dt = Dict()
+    dt["time"] = curr_time
     if options.extended_trace
         dt["x"] = copy(state.x)
         dt["g(x)"] = copy(gradient(d))
         dt["h(x)"] = copy(NLSolversBase.hessian(d))
         dt["Current step size"] = state.alpha
     end
-    g_norm = vecnorm(gradient(d), Inf)
+    g_norm = norm(gradient(d), Inf)
     update!(tr,
             iteration,
             value(d),

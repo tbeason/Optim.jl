@@ -2,9 +2,6 @@
 
 @testset "Toy test problem 1" begin
     # Test on actual optimization problems.
-    # TODO: why is srand called here?
-    srand(42)
-
     function f(x::Vector)
         (x[1] - 5.0)^4
     end
@@ -18,7 +15,7 @@
         storage[1] = 12.0 * (x[1] - 5.0)^2 * v[1]
     end
 
-    d = Optim.TwiceDifferentiableHV(f, fg!, hv!)
+    d = Optim.TwiceDifferentiableHV(f, fg!, hv!, [0.0])
 
     result = Optim.optimize(d, [0.0], Optim.KrylovTrustRegion())
     @test norm(Optim.minimizer(result) - [5.0]) < 0.01
@@ -40,7 +37,7 @@ end
         Hv[:] = [1.0 0.0; 0.0 eta] * v
     end
 
-    d2 = Optim.TwiceDifferentiableHV(f2, fg2!, hv2!)
+    d2 = Optim.TwiceDifferentiableHV(f2, fg2!, hv2!, Float64[127, 921])
 
     result = Optim.optimize(d2, Float64[127, 921], Optim.KrylovTrustRegion())
     @test result.g_converged
@@ -48,19 +45,19 @@ end
 end
 
 @testset "Stock test problems" begin
-    for (name, prob) in Optim.UnconstrainedProblems.examples
+    for (name, prob) in MultivariateProblems.UnconstrainedProblems.examples
       if prob.istwicedifferentiable
             hv!(storage::Vector, x::Vector, v::Vector) = begin
                 n = length(x)
-                H = Matrix{Float64}(n, n)
-                prob.h!(H, x)
+                H = Matrix{Float64}(undef, n, n)
+                MVP.hessian(prob)(H, x)
                 storage .= H * v
             end
             fg!(g::Vector, x::Vector) = begin
-                prob.g!(g, x)
-                prob.f(x)
+                MVP.gradient(prob)(g,x)
+                MVP.objective(prob)(x)
             end
-        ddf = Optim.TwiceDifferentiableHV(prob.f, fg!, hv!)
+        ddf = Optim.TwiceDifferentiableHV(MVP.objective(prob), fg!, hv!, prob.initial_x)
         result = Optim.optimize(ddf, prob.initial_x, Optim.KrylovTrustRegion())
         @test norm(Optim.minimizer(result) - prob.solutions) < 1e-2
       end

@@ -10,10 +10,11 @@
 # reference to a particular point in this paper.
 #
 # Several aspects of the following have also been incorporated:
-#   W. W. Hager and H. Zhang (2012) The limited memory conjugate
+#   W. W. Hager and H. Zhang (2013) The limited memory conjugate
 #     gradient method.
 #
-# This paper will be denoted HZ2012 below.
+# This paper will be denoted HZ2013 below.
+#
 #
 # There are some modifications and/or extensions from what's in the
 # paper (these may or may not be extensions of the cg_descent code
@@ -41,8 +42,8 @@
 #   below.  The default value for alphamax is Inf. See alphamaxfunc
 #   for cgdescent and alphamax for linesearch_hz.
 
-struct ConjugateGradient{T, Tprep<:Union{Function, Void}, IL, L} <: Optimizer
-    eta::Float64
+struct ConjugateGradient{Tf, T, Tprep<:Union{Function, Nothing}, IL, L} <: FirstOrderOptimizer
+    eta::Tf
     P::T
     precondprep!::Tprep
     alphaguess!::IL
@@ -60,7 +61,8 @@ ConjugateGradient(; alphaguess = LineSearches.InitialHagerZhang(),
 linesearch = LineSearches.HagerZhang(),
 eta = 0.4,
 P = nothing,
-precondprep = (P, x) -> nothing)
+precondprep = (P, x) -> nothing,
+manifold = Flat())
 ```
 The strictly positive constant ``eta`` is used in determining
 the next step direction, and the default here deviates from the one used in the
@@ -84,114 +86,113 @@ function ConjugateGradient(; alphaguess = LineSearches.InitialHagerZhang(),
                              precondprep = (P, x) -> nothing,
                              manifold::Manifold=Flat())
 
-    ConjugateGradient(Float64(eta),
+    ConjugateGradient(eta,
                       P, precondprep,
                       alphaguess, linesearch,
                       manifold)
 end
 
-mutable struct ConjugateGradientState{T,N,G}
-    x::Array{T,N}
-    x_previous::Array{T,N}
+mutable struct ConjugateGradientState{Tx,T,G} <: AbstractOptimizerState
+    x::Tx
+    x_previous::Tx
     g_previous::G
     f_x_previous::T
-    y::Array{T,N}
-    py::Array{T,N}
-    pg::Array{T,N}
-    s::Array{T,N}
+    y::Tx
+    py::Tx
+    pg::Tx
+    s::Tx
     @add_linesearch_fields()
 end
 
 
-function initial_state(method::ConjugateGradient, options, d, initial_x::Array{T}) where T
+function initial_state(method::ConjugateGradient, options, d, initial_x)
+    T = eltype(initial_x)
     initial_x = copy(initial_x)
-    retract!(method.manifold, real_to_complex(d,initial_x))
-    value_gradient!(d, initial_x)
-    project_tangent!(method.manifold, real_to_complex(d,gradient(d)), real_to_complex(d,initial_x))
+    retract!(method.manifold, initial_x)
+
+    value_gradient!!(d, initial_x)
+
+    project_tangent!(method.manifold, gradient(d), initial_x)
     pg = copy(gradient(d))
-    @assert typeof(value(d)) == T
+
+    # Could move this out? as a general check?
+    #=
     # Output messages
-    if !isfinite(value(d))
-        error("Must have finite starting value")
-    end
+    isfinite(value(d)) || error("Initial f(x) is not finite ($(value(d)))")
     if !all(isfinite, gradient(d))
         @show gradient(d)
-        @show find(!isfinite.(gradient(d)))
+        @show find(.!isfinite.(gradient(d)))
         error("Gradient must have all finite values at starting point")
     end
-
+    =#
     # Determine the intial search direction
     #    if we don't precondition, then this is an extra superfluous copy
     #    TODO: consider allowing a reference for pg instead of a copy
-    method.precondprep!(method.P, real_to_complex(d,initial_x))
-    A_ldiv_B!(real_to_complex(d,pg), method.P, real_to_complex(d,gradient(d)))
+    method.precondprep!(method.P, initial_x)
+    ldiv!(pg, method.P, gradient(d))
     if method.P != nothing
-        project_tangent!(method.manifold, real_to_complex(d,pg), real_to_complex(d,initial_x))
+        project_tangent!(method.manifold, pg, initial_x)
     end
 
     ConjugateGradientState(initial_x, # Maintain current state in state.x
-                         similar(initial_x), # Maintain previous state in state.x_previous
+                         copy(initial_x), # Maintain previous state in state.x_previous
                          similar(gradient(d)), # Store previous gradient in state.g_previous
-                         T(NaN), # Store previous f in state.f_x_previous
+                         real(T)(NaN), # Store previous f in state.f_x_previous
                          similar(initial_x), # Intermediate value in CG calculation
                          similar(initial_x), # Preconditioned intermediate value in CG calculation
                          pg, # Maintain the preconditioned gradient in pg
                          -pg, # Maintain current search direction in state.s
-                         @initial_linesearch()...) # Maintain a cache for line search results in state.lsr
+                         @initial_linesearch()...)
 end
 
-function update_state!(d, state::ConjugateGradientState{T}, method::ConjugateGradient) where T
+function update_state!(d, state::ConjugateGradientState, method::ConjugateGradient)
         # Search direction is predetermined
 
         # Maintain a record of the previous gradient
-        copy!(state.g_previous, gradient(d))
+        copyto!(state.g_previous, gradient(d))
 
         # Determine the distance of movement along the search line
         lssuccess = perform_linesearch!(state, method, ManifoldObjective(method.manifold, d))
 
         # Update current position # x = x + alpha * s
         @. state.x = state.x + state.alpha * state.s
-        retract!(method.manifold, real_to_complex(d,state.x))
+        retract!(method.manifold, state.x)
 
         # Update the function value and gradient
         value_gradient!(d, state.x)
-        project_tangent!(method.manifold, real_to_complex(d,gradient(d)), real_to_complex(d,state.x))
+        project_tangent!(method.manifold, gradient(d), state.x)
 
         # Check sanity of function and gradient
-        if !isfinite(value(d))
-            error("Function value must be finite")
-        end
+        isfinite(value(d)) || error("Non-finite f(x) while optimizing ($(value(d)))")
 
         # Determine the next search direction using HZ's CG rule
-        #  Calculate the beta factor (HZ2012)
+        #  Calculate the beta factor (HZ2013)
         # -----------------
         # Comment on py: one could replace the computation of py with
-        #    ydotpgprev = vecdot(y, pg)
-        #    vecdot(y, py)  >>>  vecdot(y, pg) - ydotpgprev
+        #    ydotpgprev = dot(y, pg)
+        #    dot(y, py)  >>>  dot(y, pg) - ydotpgprev
         # but I am worried about round-off here, so instead we make an
         # extra copy, which is probably minimal overhead.
         # -----------------
-        method.precondprep!(method.P, real_to_complex(d,state.x))
-        dPd = dot(real_to_complex(d,state.s), method.P, real_to_complex(d,state.s))
-        etak::T = method.eta * vecdot(state.s, state.g_previous) / dPd
+        method.precondprep!(method.P, state.x)
+        dPd = real(dot(state.s, method.P, state.s))
+        etak = method.eta * real(dot(state.s, state.g_previous)) / dPd # New in HZ2013
         state.y .= gradient(d) .- state.g_previous
-        ydots = vecdot(state.y, state.s)
-        copy!(state.py, state.pg)        # below, store pg - pg_previous in py
-        A_ldiv_B!(real_to_complex(d,state.pg), method.P, real_to_complex(d,gradient(d)))
+        ydots = real(dot(state.y, state.s))
+        copyto!(state.py, state.pg)        # below, store pg - pg_previous in py
+        ldiv!(state.pg, method.P, gradient(d))
         state.py .= state.pg .- state.py
-        betak = (vecdot(state.y, state.pg) - vecdot(state.y, state.py) * vecdot(gradient(d), state.s) / ydots) / ydots
-        beta = max(betak, etak)
+        # ydots may be zero if f is not strongly convex or the line search does not satisfy Wolfe
+        betak = (real(dot(state.y, state.pg)) - real(dot(state.y, state.py)) * real(dot(gradient(d), state.s)) / ydots) / ydots
+        # betak may be undefined if ydots is zero (may due to f not strongly convex or non-Wolfe linesearch)
+        beta = NaNMath.max(betak, etak) # TODO: Set to zero if betak is NaN?
         state.s .= beta.*state.s .- state.pg
-        project_tangent!(method.manifold, real_to_complex(d,state.s), real_to_complex(d,state.x))
+        project_tangent!(method.manifold, state.s, state.x)
         lssuccess == false # break on linesearch error
 end
 
 update_g!(d, state, method::ConjugateGradient) = nothing
 
-function assess_convergence(state::ConjugateGradientState, d, options)
-  default_convergence_assessment(state, d, options)
-end
-
-function trace!(tr, d, state, iteration, method::ConjugateGradient, options)
-  common_trace!(tr, d, state, iteration, method, options)
+function trace!(tr, d, state, iteration, method::ConjugateGradient, options, curr_time=time())
+  common_trace!(tr, d, state, iteration, method, options, curr_time)
 end

@@ -15,7 +15,7 @@ implemented:
 Precisely what these operations mean, depends on how `P` is stored. Commonly, we store a matrix `P` which
 approximates the Hessian in some vague sense. In this case,
 
-* `A_ldiv_B!(pgr, P, gr) = copy!(pgr, P \ A)`
+* `A_ldiv_B!(pgr, P, gr) = copyto!(pgr, P \ A)`
 * `dot(x, P, y) = dot(x, P * y)`
 
 Finally, it is possible to update the preconditioner as the state variable `x`
@@ -35,15 +35,15 @@ its inverse elements.
 Below, we see an example where a function is minimized without and with a preconditioner
 applied.
 ```jl
-using ForwardDiff
+using ForwardDiff, Optim, SparseArrays
 initial_x = zeros(100)
-plap(U; n = length(U)) = (n-1)*sum((0.1 + diff(U).^2).^2 ) - sum(U) / (n-1)
+plap(U; n = length(U)) = (n-1)*sum((0.1 .+ diff(U).^2).^2 ) - sum(U) / (n-1)
 plap1(x) = ForwardDiff.gradient(plap,x)
-precond(n) = spdiagm((-ones(n-1), 2*ones(n), -ones(n-1)), (-1,0,1), n, n)*(n+1)
-df = OnceDifferentiable(x -> plap([0; x; 0]),
-                            (g, x) -> copy!(g, (plap1([0; x; 0]))[2:end-1]))
-result = Optim.optimize(df, initial_x, method = ConjugateGradient(P = nothing))
-result = Optim.optimize(df, initial_x, method = ConjugateGradient(P = precond(100)))
+precond(n) = spdiagm(-1 => -ones(n-1), 0 => 2ones(n), 1 => -ones(n-1)) * (n+1)
+f(x) = plap([0; x; 0])
+g!(G, x) = copyto!(G, (plap1([0; x; 0]))[2:end-1])
+result = Optim.optimize(f, g!, initial_x, method = ConjugateGradient(P = nothing))
+result = Optim.optimize(f, g!, initial_x, method = ConjugateGradient(P = precond(100)))
 ```
 The former optimize call converges at a slower rate than the latter. Looking at a
  plot of the 2D version of the function shows the problem.

@@ -47,12 +47,12 @@
     @test summary(results) == "Newton's Method"
 
     @testset "newton in concave region" begin
-        prob=Optim.UnconstrainedProblems.examples["Himmelblau"]
-        res = optimize(prob.f, prob.g!, prob.h!, [0., 0.], Newton())
+        prob=MultivariateProblems.UnconstrainedProblems.examples["Himmelblau"]
+        res = optimize(MVP.objective(prob), MVP.gradient(prob), MVP.hessian(prob), [0., 0.], Newton())
         @test norm(Optim.minimizer(res) - prob.solutions) < 1e-9
     end
 
     @testset "Optim problems" begin
-        run_optim_tests(Newton())
+        run_optim_tests(Newton(); skip = ("Trigonometric",), show_name = debug_printing)
     end
 end

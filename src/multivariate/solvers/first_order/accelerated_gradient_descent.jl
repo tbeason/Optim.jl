@@ -6,7 +6,7 @@
 # If converged, return y_{t}
 # x_{t} = y_{t} + (t - 1.0) / (t + 2.0) * (y_{t} - y_{t - 1})
 
-struct AcceleratedGradientDescent{IL, L} <: Optimizer
+struct AcceleratedGradientDescent{IL, L} <: FirstOrderOptimizer
     alphaguess!::IL
     linesearch!::L
     manifold::Manifold
@@ -21,36 +21,39 @@ function AcceleratedGradientDescent(;
     AcceleratedGradientDescent(alphaguess, linesearch, manifold)
 end
 
-mutable struct AcceleratedGradientDescentState{T,N}
-    x::Array{T,N}
-    x_previous::Array{T,N}
+mutable struct AcceleratedGradientDescentState{T, Tx} <: AbstractOptimizerState
+    x::Tx
+    x_previous::Tx
     f_x_previous::T
     iteration::Int
-    y::Array{T,N}
-    y_previous::Array{T,N}
-    s::Array{T,N}
+    y::Tx
+    y_previous::Tx
+    s::Tx
     @add_linesearch_fields()
 end
 
-function initial_state(method::AcceleratedGradientDescent, options, d, initial_x::Array{T}) where T
+function initial_state(method::AcceleratedGradientDescent, options, d, initial_x::AbstractArray{T}) where T
     initial_x = copy(initial_x)
-    retract!(method.manifold, real_to_complex(d,initial_x))
-    value_gradient!(d, initial_x)
-    project_tangent!(method.manifold, real_to_complex(d,gradient(d)), real_to_complex(d,initial_x))
+    retract!(method.manifold, initial_x)
 
-    AcceleratedGradientDescentState(initial_x, # Maintain current state in state.x
+    value_gradient!!(d, initial_x)
+
+    project_tangent!(method.manifold, gradient(d), initial_x)
+
+    AcceleratedGradientDescentState(copy(initial_x), # Maintain current state in state.x
                          copy(initial_x), # Maintain previous state in state.x_previous
-                         T(NaN), # Store previous f in state.f_x_previous
+                         real(T)(NaN), # Store previous f in state.f_x_previous
                          0, # Iteration
                          copy(initial_x), # Maintain intermediary current state in state.y
                          similar(initial_x), # Maintain intermediary state in state.y_previous
                          similar(initial_x), # Maintain current search direction in state.s
-                         @initial_linesearch()...) # Maintain a cache for line search results in state.lsr
+                         @initial_linesearch()...)
 end
 
-function update_state!(d, state::AcceleratedGradientDescentState{T}, method::AcceleratedGradientDescent) where T
+function update_state!(d, state::AcceleratedGradientDescentState, method::AcceleratedGradientDescent)
+    value_gradient!(d, state.x)
     state.iteration += 1
-    project_tangent!(method.manifold, real_to_complex(d,gradient(d)), real_to_complex(d,state.x))
+    project_tangent!(method.manifold, gradient(d), state.x)
     # Search direction is always the negative gradient
     state.s .= .-gradient(d)
 
@@ -58,23 +61,22 @@ function update_state!(d, state::AcceleratedGradientDescentState{T}, method::Acc
     lssuccess = perform_linesearch!(state, method, ManifoldObjective(method.manifold, d))
 
     # Make one move in the direction of the gradient
-    copy!(state.y_previous, state.y)
+    copyto!(state.y_previous, state.y)
     state.y .= state.x .+ state.alpha.*state.s
-    retract!(method.manifold, real_to_complex(d,state.y))
+    retract!(method.manifold, state.y)
 
     # Update current position with Nesterov correction
     scaling = (state.iteration - 1) / (state.iteration + 2)
     state.x .= state.y .+ scaling.*(state.y .- state.y_previous)
-    retract!(method.manifold, real_to_complex(d,state.x))
+    retract!(method.manifold, state.x)
 
     lssuccess == false # break on linesearch error
 end
 
-function assess_convergence(state::AcceleratedGradientDescentState, d, options)
-  default_convergence_assessment(state, d, options)
+function trace!(tr, d, state, iteration, method::AcceleratedGradientDescent, options, curr_time=time())
+  common_trace!(tr, d, state, iteration, method, options, curr_time)
 end
 
-
-function trace!(tr, d, state, iteration, method::AcceleratedGradientDescent, options)
-  common_trace!(tr, d, state, iteration, method, options)
+function default_options(method::AcceleratedGradientDescent)
+    Dict(:allow_f_increases => true)
 end

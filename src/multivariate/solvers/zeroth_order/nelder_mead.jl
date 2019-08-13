@@ -6,9 +6,9 @@ struct AffineSimplexer <: Simplexer
 end
 AffineSimplexer(;a = 0.025, b = 0.5) = AffineSimplexer(a, b)
 
-function simplexer(S::AffineSimplexer, initial_x::Array{T,N}) where {T,N}
+function simplexer(S::AffineSimplexer, initial_x::Tx) where Tx
     n = length(initial_x)
-    initial_simplex = Array{T, N}[copy(initial_x) for i = 1:n+1]
+    initial_simplex = Tx[copy(initial_x) for i = 1:n+1]
     for j = 1:n
         initial_simplex[j+1][j] = (1+S.b) * initial_simplex[j+1][j] + S.a
     end
@@ -37,22 +37,44 @@ end
 FixedParameters(; α = 1.0, β = 2.0, γ = 0.5, δ = 0.5) = FixedParameters(α, β, γ, δ)
 parameters(P::FixedParameters, n::Integer) = (P.α, P.β, P.γ, P.δ)
 
-struct NelderMead{Ts <: Simplexer, Tp <: NMParameters} <: Optimizer
+struct NelderMead{Ts <: Simplexer, Tp <: NMParameters} <: ZerothOrderOptimizer
     initial_simplex::Ts
     parameters::Tp
 end
 
-Base.summary(::NelderMead) = "Nelder-Mead"
+"""
+# NelderMead
+## Constructor
+```julia
+NelderMead(; parameters = AdaptiveParameters(),
+             initial_simplex = AffineSimplexer())
+```
 
+The constructor takes 2 keywords:
+
+* `parameters`, an instance of either `AdaptiveParameters` or `FixedParameters`,
+and is used to generate parameters for the Nelder-Mead Algorithm
+* `initial_simplex`, an instance of `AffineSimplexer`
+
+## Description
+Our current implementation of the Nelder-Mead algorithm is based on [1] and [3].
+Gradient-free methods can be a bit sensitive to starting values and tuning parameters,
+so it is a good idea to be careful with the defaults provided in Optim.jl.
+
+Instead of using gradient information, Nelder-Mead is a direct search method. It keeps
+track of the function value at a number of points in the search space. Together, the
+points form a simplex. Given a simplex, we can perform one of four actions: reflect,
+expand, contract, or shrink. Basically, the goal is to iteratively replace the worst
+point with a better point. More information can be found in [1], [2] or [3].
+
+## References
+- [1] Nelder, John A. and R. Mead (1965). "A simplex method for function minimization". Computer Journal 7: 308–313. doi:10.1093/comjnl/7.4.308
+- [2] Lagarias, Jeffrey C., et al. "Convergence properties of the Nelder–Mead simplex method in low dimensions." SIAM Journal on Optimization 9.1 (1998): 112-147
+- [3] Gao, Fuchang and Lixing Han (2010). "Implementing the Nelder-Mead simplex algorithm with adaptive parameters". Computational Optimization and Applications. doi:10.1007/s10589-010-9329-3
+"""
 function NelderMead(; kwargs...)
     KW = Dict(kwargs)
-    if haskey(KW, :a) || haskey(KW, :g) || haskey(KW, :b)
-        a, g, b = 1.0, 2.0, 0.5
-        haskey(KW, :a) && (a = KW[:a])
-        haskey(KW, :g) && (g = KW[:g])
-        haskey(KW, :b) && (b = KW[:b])
-        return NelderMead(a, g, b)
-    elseif haskey(KW, :initial_simplex) || haskey(KW, :parameters)
+    if haskey(KW, :initial_simplex) || haskey(KW, :parameters)
         initial_simplex, parameters = AffineSimplexer(), AdaptiveParameters()
         haskey(KW, :initial_simplex) && (initial_simplex = KW[:initial_simplex])
         haskey(KW, :parameters) && (parameters = KW[:parameters])
@@ -62,19 +84,19 @@ function NelderMead(; kwargs...)
     end
 end
 
+Base.summary(::NelderMead) = "Nelder-Mead"
+
 # centroid except h-th vertex
-function centroid!(c::Array{T}, simplex, h=0) where T
+function centroid!(c::AbstractArray{T}, simplex, h=0) where T
     n = length(c)
     fill!(c, zero(T))
     @inbounds for i in 1:n+1
         if i != h
             xi = simplex[i]
-            @simd for j in 1:n
-                c[j] += xi[j]
-            end
+            c .+= xi
         end
     end
-    scale!(c, 1/n)
+    rmul!(c, T(1)/n)
 end
 
 centroid(simplex, h) = centroid!(similar(simplex[1]), simplex, h)
@@ -86,7 +108,7 @@ function print_header(method::NelderMead)
     @printf "------   --------------    --------------\n"
 end
 
-function Base.show(io::IO, trace::OptimizationTrace{NelderMead})
+function Base.show(io::IO, trace::OptimizationTrace{T, NelderMead}) where T
     @printf io "Iter     Function value    √(Σ(yᵢ-ȳ)²)/n \n"
     @printf io "------   --------------    --------------\n"
     for state in trace.states
@@ -105,17 +127,17 @@ function Base.show(io::IO, t::OptimizationState{NelderMead})
     return
 end
 
-mutable struct NelderMeadState{T, N}
-    x::Array{T,N}
+mutable struct NelderMeadState{Tx, T, Tfs} <: ZerothOrderState
+    x::Tx
     m::Int
-    simplex::Vector{Array{T,N}}
-    x_centroid::Array{T,N}
-    x_lowest::Array{T,N}
-    x_second_highest::Array{T,N}
-    x_highest::Array{T,N}
-    x_reflect::Array{T,N}
-    x_cache::Array{T,N}
-    f_simplex::Array{T,N}
+    simplex::Vector{Tx}
+    x_centroid::Tx
+    x_lowest::Tx
+    x_second_highest::Tx
+    x_highest::Tx
+    x_reflect::Tx
+    x_cache::Tx
+    f_simplex::Tfs
     nm_x::T
     f_lowest::T
     i_order::Vector{Int}
@@ -126,15 +148,19 @@ mutable struct NelderMeadState{T, N}
     step_type::String
 end
 
-function initial_state(method::NelderMead, options, f::F, initial_x::Array{T}) where {F, T}
+function initial_state(method::NelderMead, options, d, initial_x)
+    T = eltype(initial_x)
     n = length(initial_x)
     m = n + 1
     simplex = simplexer(method.initial_simplex, initial_x)
     f_simplex = zeros(T, m)
+
+    value!!(d, first(simplex))
+
     @inbounds for i in 1:length(simplex)
-        f_simplex[i] = value(f, simplex[i])
+        f_simplex[i] = value(d, simplex[i])
     end
-    # Get the indeces that correspond to the ordering of the f values
+    # Get the indices that correspond to the ordering of the f values
     # at the vertices. i_order[1] is the index in the simplex of the vertex
     # with the lowest function value, and i_order[end] is the index in the
     # simplex of the vertex with the highest function value
@@ -142,15 +168,15 @@ function initial_state(method::NelderMead, options, f::F, initial_x::Array{T}) w
 
     α, β, γ, δ = parameters(method.parameters, n)
 
-NelderMeadState(similar(initial_x), # Variable to hold final minimizer value for MultivariateOptimizationResults
+NelderMeadState(copy(initial_x), # Variable to hold final minimizer value for MultivariateOptimizationResults
           m, # Number of vertices in the simplex
           simplex, # Maintain simplex in state.simplex
           centroid(simplex,  i_order[m]), # Maintain centroid in state.centroid
-          similar(initial_x), # Store cache in state.x_lowest
-          similar(initial_x), # Store cache in state.x_second_highest
-          similar(initial_x), # Store cache in state.x_highest
-          similar(initial_x), # Store cache in state.x_reflect
-          similar(initial_x), # Store cache in state.x_cache
+          copy(initial_x), # Store cache in state.x_lowest
+          copy(initial_x), # Store cache in state.x_second_highest
+          copy(initial_x), # Store cache in state.x_highest
+          copy(initial_x), # Store cache in state.x_reflect
+          copy(initial_x), # Store cache in state.x_cache
           f_simplex, # Store objective values at the vertices in state.f_simplex
           T(nmobjective(f_simplex, n, m)), # Store nmobjective in state.nm_x
           f_simplex[i_order[1]], # Store lowest f in state.f_lowest
@@ -168,9 +194,9 @@ function update_state!(f::F, state::NelderMeadState{T}, method::NelderMead) wher
     n, m = length(state.x), state.m
 
     centroid!(state.x_centroid, state.simplex, state.i_order[m])
-    copy!(state.x_lowest, state.simplex[state.i_order[1]])
-    copy!(state.x_second_highest, state.simplex[state.i_order[n]])
-    copy!(state.x_highest, state.simplex[state.i_order[m]])
+    copyto!(state.x_lowest, state.simplex[state.i_order[1]])
+    copyto!(state.x_second_highest, state.simplex[state.i_order[n]])
+    copyto!(state.x_highest, state.simplex[state.i_order[m]])
     state.f_lowest = state.f_simplex[state.i_order[1]]
     f_second_highest = state.f_simplex[state.i_order[n]]
     f_highest = state.f_simplex[state.i_order[m]]
@@ -189,11 +215,11 @@ function update_state!(f::F, state::NelderMeadState{T}, method::NelderMead) wher
         f_expand = value(f, state.x_cache)
 
         if f_expand < f_reflect
-            copy!(state.simplex[state.i_order[m]], state.x_cache)
+            copyto!(state.simplex[state.i_order[m]], state.x_cache)
             @inbounds state.f_simplex[state.i_order[m]] = f_expand
             state.step_type = "expansion"
         else
-            copy!(state.simplex[state.i_order[m]], state.x_reflect)
+            copyto!(state.simplex[state.i_order[m]], state.x_reflect)
             @inbounds state.f_simplex[state.i_order[m]] = f_reflect
             state.step_type = "reflection"
         end
@@ -204,7 +230,7 @@ function update_state!(f::F, state::NelderMeadState{T}, method::NelderMead) wher
         end
         state.i_order[1] = i_highest
     elseif f_reflect < f_second_highest
-        copy!(state.simplex[state.i_order[m]], state.x_reflect)
+        copyto!(state.simplex[state.i_order[m]], state.x_reflect)
         @inbounds state.f_simplex[state.i_order[m]] = f_reflect
         state.step_type = "reflection"
         sortperm!(state.i_order, state.f_simplex)
@@ -216,7 +242,7 @@ function update_state!(f::F, state::NelderMeadState{T}, method::NelderMead) wher
             end
             f_outside_contraction = value(f, state.x_cache)
             if f_outside_contraction < f_reflect
-                copy!(state.simplex[state.i_order[m]], state.x_cache)
+                copyto!(state.simplex[state.i_order[m]], state.x_cache)
                 @inbounds state.f_simplex[state.i_order[m]] = f_outside_contraction
                 state.step_type = "outside contraction"
                 sortperm!(state.i_order, state.f_simplex)
@@ -231,7 +257,7 @@ function update_state!(f::F, state::NelderMeadState{T}, method::NelderMead) wher
             end
             f_inside_contraction = value(f, state.x_cache)
             if f_inside_contraction < f_highest
-                copy!(state.simplex[state.i_order[m]], state.x_cache)
+                copyto!(state.simplex[state.i_order[m]], state.x_cache)
                 @inbounds state.f_simplex[state.i_order[m]] = f_inside_contraction
                 state.step_type = "inside contraction"
                 sortperm!(state.i_order, state.f_simplex)
@@ -244,7 +270,7 @@ function update_state!(f::F, state::NelderMeadState{T}, method::NelderMead) wher
     if shrink
         for i = 2:m
             ord = state.i_order[i]
-            copy!(state.simplex[ord], state.x_lowest + state.δ*(state.simplex[ord]-state.x_lowest))
+            copyto!(state.simplex[ord], state.x_lowest + state.δ*(state.simplex[ord]-state.x_lowest))
             state.f_simplex[ord] = value(f, state.simplex[ord])
         end
         step_type = "shrink"
@@ -255,7 +281,7 @@ function update_state!(f::F, state::NelderMeadState{T}, method::NelderMead) wher
     false
 end
 
-function after_while!(f::F, state, method::NelderMead, options) where F
+function after_while!(f, state, method::NelderMead, options)
     sortperm!(state.i_order, state.f_simplex)
     x_centroid_min = centroid(state.simplex, state.i_order[state.m])
     f_centroid_min = value(f, x_centroid_min)
@@ -265,25 +291,32 @@ function after_while!(f::F, state, method::NelderMead, options) where F
         x_min = x_centroid_min
         f_min = f_centroid_min
     end
-    f.f_x = f_min
-    state.x[:] = x_min
+    f.F = f_min
+    state.x .= x_min
 end
 # We don't have an f_x_previous in NelderMeadState, so we need to special case these
 pick_best_x(f_increased, state::NelderMeadState) = state.x
 pick_best_f(f_increased, state::NelderMeadState, d) = value(d)
 
-function assess_convergence(state::NelderMeadState, d, options)
-    g_converged = state.nm_x <= options.g_tol # Hijact g_converged for NM stopping criterior
+function assess_convergence(state::NelderMeadState, d, options::Options)
+    g_converged = state.nm_x <= options.g_abstol # Hijact g_converged for NM stopping criterior
     return false, false, g_converged, g_converged, false
 end
-f_residual(d::AbstractObjective, state::NelderMeadState, options::Options) = convert(typeof(value(d)), NaN)
-x_residual(state::NelderMeadState) = convert(eltype(state.x), NaN)
 
-function trace!(tr, d, state, iteration, method::NelderMead, options)
+function initial_convergence(d, state::NelderMeadState, method::NelderMead, initial_x, options)
+    nmobjective(state.f_simplex, state.m, length(initial_x)) < options.g_abstol
+end
+
+function trace!(tr, d, state, iteration, method::NelderMead, options, curr_time=time())
     dt = Dict()
+    dt["time"] = curr_time
     if options.extended_trace
         dt["centroid"] = copy(state.x_centroid)
         dt["step_type"] = state.step_type
+    end
+    if options.trace_simplex
+        dt["simplex"] = state.simplex
+        dt["simplex_values"] = state.f_simplex
     end
     update!(tr,
     iteration,
@@ -293,5 +326,6 @@ function trace!(tr, d, state, iteration, method::NelderMead, options)
     options.store_trace,
     options.show_trace,
     options.show_every,
-    options.callback)
+    options.callback,
+    options.trace_simplex)
 end

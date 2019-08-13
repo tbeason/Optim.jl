@@ -1,26 +1,20 @@
 @testset "interface" begin
-    problem = Optim.UnconstrainedProblems.examples["Exponential"]
-    f = problem.f
-    g! = problem.g!
-    h! = problem.h!
-    nd = NonDifferentiable(f, zeros(problem.initial_x))
-    od = OnceDifferentiable(f, g!, zeros(problem.initial_x))
-    td = TwiceDifferentiable(f, g!, h!, zeros(problem.initial_x))
-    tdref = TwiceDifferentiable(f, g!, h!, zeros(problem.initial_x))
+    problem = MultivariateProblems.UnconstrainedProblems.examples["Exponential"]
+    f = MVP.objective(problem)
+    g! = MVP.gradient(problem)
+    h! = MVP.hessian(problem)
+    nd = NonDifferentiable(f, fill!(similar(problem.initial_x), 0))
+    od = OnceDifferentiable(f, g!, fill!(similar(problem.initial_x), 0))
+    td = TwiceDifferentiable(f, g!, h!, fill!(similar(problem.initial_x), 0))
+    tdref = TwiceDifferentiable(f, g!, h!, fill!(similar(problem.initial_x), 0))
     ref = optimize(tdref, problem.initial_x, Newton(), Optim.Options())
     # test AbstractObjective interface
     for obj in (nd, od, td)
         res = []
-        push!(res, optimize(obj))
-        # test that initial x isn't overwritten ref #491
-        @test !(Optim.initial_state(res[end]) == Optim.minimizer(res[end]))
         push!(res, optimize(obj, problem.initial_x))
 
         push!(res, optimize(obj, problem.initial_x, Optim.Options()))
 
-        push!(res, optimize(obj, Optim.Options()))
-        # Test passing the objective, method and option, but no inital_x
-        push!(res, optimize(obj, NelderMead(), Optim.Options()))
         for r in res
             @test norm(Optim.minimum(ref)-Optim.minimum(r)) < 1e-6
         end
@@ -44,83 +38,34 @@
     end
 end
 
-@testset "uninitialized interface" begin
-    problem = Optim.UnconstrainedProblems.examples["Exponential"]
-    f = problem.f
-    g! = problem.g!
-    h! = problem.h!
-    nd = NonDifferentiable(f)
-    od = OnceDifferentiable(f, g!)
-    td = TwiceDifferentiable(f, g!, h!)
-    ref = optimize(td, problem.initial_x, Newton(), Optim.Options())
-    # test UninitializedObjective interface
-    for obj in (nd, od, td)
-        res = []
-        push!(res, optimize(obj, problem.initial_x))
-
-        push!(res, optimize(obj, problem.initial_x, Optim.Options()))
-
-        push!(res, optimize(obj, problem.initial_x, Optim.Options()))
-        # Test passing the objective, method and option, but no inital_x
-        push!(res, optimize(obj, problem.initial_x, NelderMead(), Optim.Options()))
-        for r in res
-            @test norm(Optim.minimum(ref)-Optim.minimum(r)) < 1e-6
-        end
+@testset "only_fg!, only_fgh!" begin
+    f(x) = (1.0 - x[1])^2 + 100.0 * (x[2] - x[1]^2)^2
+    function g!(G, x)
+      G[1] = -2.0 * (1.0 - x[1]) - 400.0 * (x[2] - x[1]^2) * x[1]
+      G[2] = 200.0 * (x[2] - x[1]^2)
+      G
     end
-    ad_res = optimize(od, problem.initial_x, Newton())
-    @test norm(Optim.minimum(ref)-Optim.minimum(ad_res)) < 1e-6
-    ad_res2 = optimize(od, problem.initial_x, Newton())
-    @test norm(Optim.minimum(ref)-Optim.minimum(ad_res2)) < 1e-6
-    # test f, g!, h! interface
-    for tup in ((f,), (f, g!), (f, g!, h!))
-        fgh_res = []
-        push!(fgh_res, optimize(tup..., problem.initial_x))
-        for m in (NelderMead(), LBFGS(), Newton())
-            push!(fgh_res, optimize(tup..., problem.initial_x; f_tol = 1e-8))
-            push!(fgh_res, optimize(tup..., problem.initial_x, m))
-            push!(fgh_res, optimize(tup..., problem.initial_x, m, Optim.Options()))
-        end
-        for r in fgh_res
-            @test norm(Optim.minimum(ref)-Optim.minimum(r)) < 1e-6
-        end
+    function h!(H, x)
+      H[1, 1] = 2.0 - 400.0 * x[2] + 1200.0 * x[1]^2
+      H[1, 2] = -400.0 * x[1]
+      H[2, 1] = -400.0 * x[1]
+      H[2, 2] = 200.0
+      H
     end
-end
-
-
-@testset "uninitialized objectives" begin
-    # Test example
-    function exponential(x::Vector)
-        return exp((2.0 - x[1])^2) + exp((3.0 - x[2])^2)
+    function fg!(F,G,x)
+      G == nothing || g!(G,x)
+      F == nothing || return f(x)
+      nothing
+    end
+    function fgh!(F,G,H,x)
+      G == nothing || g!(G,x)
+      H == nothing || h!(H,x)
+      F == nothing || return f(x)
+      nothing
     end
 
-    function exponential_gradient!(storage::Vector, x::Vector)
-        storage[1] = -2.0 * (2.0 - x[1]) * exp((2.0 - x[1])^2)
-        storage[2] = -2.0 * (3.0 - x[2]) * exp((3.0 - x[2])^2)
-    end
-    function exponential_fg!(storage, x)
-        exponential_gradient!(storage, x)
-        exponential(x)
-    end
-    function exponential_hessian!(storage::Matrix, x::Vector)
-        storage[1, 1] = 2.0 * exp((2.0 - x[1])^2) * (2.0 * x[1]^2 - 8.0 * x[1] + 9)
-        storage[1, 2] = 0.0
-        storage[2, 1] = 0.0
-        storage[2, 2] = 2.0 * exp((3.0 - x[1])^2) * (2.0 * x[2]^2 - 12.0 * x[2] + 19)
-    end
-
-    x_seed = [0.0, 0.0]
-    f_x_seed = 8157.682077608529
-
-    und = NonDifferentiable(exponential)
-    uod1 = OnceDifferentiable(exponential, exponential_gradient!)
-    uod2 = OnceDifferentiable(exponential, exponential_gradient!, exponential_fg!)
-    utd1 = TwiceDifferentiable(exponential, exponential_gradient!)
-    utd2 = TwiceDifferentiable(exponential, exponential_gradient!, exponential_hessian!)
-    utd3 = TwiceDifferentiable(exponential, exponential_gradient!, exponential_fg!, exponential_hessian!)
-    nd = NonDifferentiable(und, x_seed)
-    od1 = OnceDifferentiable(uod1, x_seed)
-    od2 = OnceDifferentiable(uod2, x_seed)
-    td1 =  TwiceDifferentiable(utd1, x_seed)
-    td2 = TwiceDifferentiable(utd2, x_seed)
-    td3 = TwiceDifferentiable(utd3, x_seed)
+    result_fg! = Optim.optimize(Optim.only_fg!(fg!), [0., 0.], Optim.LBFGS()) # works fine
+    @test result_fg!.minimizer ≈ [1,1]
+    result_fgh! = Optim.optimize(Optim.only_fgh!(fgh!), [0., 0.], Optim.Newton())
+    @test result_fgh!.minimizer ≈ [1,1]
 end

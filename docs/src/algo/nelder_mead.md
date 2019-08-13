@@ -73,13 +73,13 @@ to the `AffineSimplexer` above, but with a small twist. Instead of always adding
 a constant is only added to entries that are zero. If the entry is non-zero, five
 percent of the level is added. This might be implemented (by the user) as
 ```julia
-struct MatlabSimplexer <: Optim.Simplexer
-    a::Float64
-    b::Float64
+struct MatlabSimplexer{T} <: Optim.Simplexer
+    a::T
+    b::T
 end
 MatlabSimplexer(;a = 0.00025, b = 0.05) = MatlabSimplexer(a, b)
 
-function Optim.simplexer(A::MatlabSimplexer, initial_x::Array{T, N}) where {T, N}
+function Optim.simplexer(A::MatlabSimplexer, initial_x::AbstractArray{T, N}) where {T, N}
     n = length(initial_x)
     initial_simplex = Array{T, N}[initial_x for i = 1:n+1]
     for j = 1:n
@@ -97,7 +97,7 @@ Gao and Han (2010). These are based on the dimensionality of the problem, and
 are given by
 
 ```math
-\alpha = 1, \quad \beta = 1+2/n,\quad \gamma =0.75 + 1/2n,\quad \delta = 1-1/n
+\alpha = 1, \quad \beta = 1+2/n,\quad \gamma =0.75 - 1/2n,\quad \delta = 1-1/n
 ```
 
 It is also possible to specify the original parameters from Nelder and Mead (1965)

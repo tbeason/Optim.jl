@@ -1,4 +1,4 @@
-struct GradientDescent{IL, L, T, Tprep<:Union{Function, Void}} <: Optimizer
+struct GradientDescent{IL, L, T, Tprep<:Union{Function, Nothing}} <: FirstOrderOptimizer
     alphaguess!::IL
     linesearch!::L
     P::T
@@ -36,35 +36,38 @@ function GradientDescent(; alphaguess = LineSearches.InitialPrevious(), # TODO: 
     GradientDescent(alphaguess, linesearch, P, precondprep, manifold)
 end
 
-mutable struct GradientDescentState{T,N}
-    x::Array{T,N}
-    x_previous::Array{T,N}
+mutable struct GradientDescentState{Tx, T} <: AbstractOptimizerState
+    x::Tx
+    x_previous::Tx
     f_x_previous::T
-    s::Array{T,N}
+    s::Tx
     @add_linesearch_fields()
 end
 
-function initial_state(method::GradientDescent, options, d, initial_x::Array{T}) where T
+function initial_state(method::GradientDescent, options, d, initial_x::AbstractArray{T}) where T
     initial_x = copy(initial_x)
-    retract!(method.manifold, real_to_complex(d,initial_x))
-    value_gradient!(d, initial_x)
-    project_tangent!(method.manifold, real_to_complex(d,gradient(d)), real_to_complex(d,initial_x))
+    retract!(method.manifold, initial_x)
+
+    value_gradient!!(d, initial_x)
+
+    project_tangent!(method.manifold, gradient(d), initial_x)
 
     GradientDescentState(initial_x, # Maintain current state in state.x
-                         similar(initial_x), # Maintain previous state in state.x_previous
-                         T(NaN), # Store previous f in state.f_x_previous
+                         copy(initial_x), # Maintain previous state in state.x_previous
+                         real(T(NaN)), # Store previous f in state.f_x_previous
                          similar(initial_x), # Maintain current search direction in state.s
-                         @initial_linesearch()...) # Maintain a cache for line search results in state.lsr
+                         @initial_linesearch()...)
 end
 
 function update_state!(d, state::GradientDescentState{T}, method::GradientDescent) where T
+    value_gradient!(d, state.x)
     # Search direction is always the negative preconditioned gradient
-    project_tangent!(method.manifold, real_to_complex(d,gradient(d)), real_to_complex(d,state.x))
-    method.precondprep!(method.P, real_to_complex(d,state.x))
-    A_ldiv_B!(real_to_complex(d,state.s), method.P, real_to_complex(d,gradient(d)))
-    scale!(state.s,-1)
+    project_tangent!(method.manifold, gradient(d), state.x)
+    method.precondprep!(method.P, state.x)
+    ldiv!(state.s, method.P, gradient(d))
+    rmul!(state.s, eltype(state.s)(-1))
     if method.P != nothing
-        project_tangent!(method.manifold, real_to_complex(d,state.s), real_to_complex(d,state.x))
+        project_tangent!(method.manifold, state.s, state.x)
     end
 
     # Determine the distance of movement along the search line
@@ -72,14 +75,10 @@ function update_state!(d, state::GradientDescentState{T}, method::GradientDescen
 
     # Update current position # x = x + alpha * s
     @. state.x = state.x + state.alpha * state.s
-    retract!(method.manifold, real_to_complex(d,state.x))
+    retract!(method.manifold, state.x)
     lssuccess == false # break on linesearch error
 end
 
-function assess_convergence(state::GradientDescentState, d, options)
-  default_convergence_assessment(state, d, options)
-end
-
-function trace!(tr, d, state, iteration, method::GradientDescent, options)
-  common_trace!(tr, d, state, iteration, method, options)
+function trace!(tr, d, state, iteration, method::GradientDescent, options, curr_time=time())
+  common_trace!(tr, d, state, iteration, method, options, curr_time)
 end
